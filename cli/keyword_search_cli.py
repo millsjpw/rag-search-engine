@@ -1,0 +1,71 @@
+import argparse
+
+from lib.keyword_search import build_command, search_command, tf_command, idf_command, tfidf_command, bm25_idf_command, bm25_tf_command, bm25_search_command
+from lib.search_utils import BM25_K1, BM25_B, DEFAULT_SEARCH_LIMIT
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Keyword Search CLI")
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    subparsers.add_parser("build", help="Build the inverted index")
+
+    search_parser = subparsers.add_parser("search", help="Search movies using BM25")
+    search_parser.add_argument("query", type=str, help="Search query")
+
+    tf_parser = subparsers.add_parser("tf", help="Get term frequency for a document")
+    tf_parser.add_argument("doc_id", type=int, help="Document ID")
+    tf_parser.add_argument("term", type=str, help="Term")
+    
+    idf_parser = subparsers.add_parser("idf", help="Get inverse document frequency for a term")
+    idf_parser.add_argument("term", type=str, help="Term")
+    
+    tfidf_parser = subparsers.add_parser("tfidf", help="Get TF-IDF for a term in a document")
+    tfidf_parser.add_argument("doc_id", type=int, help="Document ID")
+    tfidf_parser.add_argument("term", type=str, help="Term")
+    
+    bm25_idf_parser = subparsers.add_parser("bm25idf", help="Get BM25 IDF for a term")
+    bm25_idf_parser.add_argument("term", type=str, help="Term")
+    
+    bm25_tf_parser = subparsers.add_parser(
+    "bm25tf", help="Get BM25 TF score for a given document ID and term"
+    )
+    bm25_tf_parser.add_argument("doc_id", type=int, help="Document ID")
+    bm25_tf_parser.add_argument("term", type=str, help="Term to get BM25 TF score for")
+    bm25_tf_parser.add_argument("k1", type=float, nargs='?', default=BM25_K1, help="Tunable BM25 K1 parameter")
+    bm25_tf_parser.add_argument("b", type=float, nargs='?', default=BM25_B, help="Tunable BM25 B parameter")
+    
+    bm25search_parser = subparsers.add_parser("bm25search", help="Search movies using full BM25 scoring")
+    bm25search_parser.add_argument("query", type=str, help="Search query")
+    bm25search_parser.add_argument("limit", type=int, nargs='?', default=DEFAULT_SEARCH_LIMIT, help="Maximum number of results to return")
+
+
+    args = parser.parse_args()
+
+    match args.command:
+        case "build":
+            print("Building inverted index...")
+            build_command()
+            print("Inverted index built successfully.")
+        case "search":
+            print("Searching for:", args.query)
+            results = search_command(args.query)
+            for i, res in enumerate(results, 1):
+                print(f"{i}. ({res['id']}) {res['title']}")
+        case "tf":
+            tf_command(args.doc_id, args.term)
+        case "idf":
+            idf_command(args.term)
+        case "tfidf":
+            tfidf_command(args.doc_id, args.term)
+        case "bm25idf":
+            bm25_idf_command(args.term)
+        case "bm25tf":
+            bm25_tf_command(args.doc_id, args.term, k1=args.k1, b=args.b)
+        case "bm25search":
+            bm25_search_command(args.query, limit=args.limit)
+        case _:
+            parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
