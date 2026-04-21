@@ -11,6 +11,8 @@ SCORE_PRECISION = 3
 BM25_K1 = 1.5
 BM25_B = 0.75
 
+DEFAULT_K = 60
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 DATA_PATH = os.path.join(PROJECT_ROOT, "data", "movies.json")
 STOPWORDS_PATH = os.path.join(PROJECT_ROOT, "data", "stopwords.txt")
