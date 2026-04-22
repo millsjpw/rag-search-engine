@@ -6,6 +6,8 @@ from lib.hybrid_search import (
     weighted_search_command,
 )
 
+from lib.llm_evaluation import llm_evaluate_relevance
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Hybrid Search CLI")
@@ -56,6 +58,11 @@ def main() -> None:
     )
     rrf_parser.add_argument(
         "--limit", type=int, default=5, help="Number of results to return (default=5)"
+    )
+    rrf_parser.add_argument(
+        "--evaluate",
+        action="store_true",
+        help="Evaluate relevance of results using LLM after retrieval",
     )
 
     args = parser.parse_args()
@@ -124,6 +131,11 @@ def main() -> None:
                     print(f"   {', '.join(ranks)}")
                 print(f"   {res['document'][:100]}...")
                 print()
+                
+            if args.evaluate:
+                evaluated = llm_evaluate_relevance(args.query, result["results"])
+                for i, res in enumerate(evaluated, 1):
+                    print(f"{i}. {res['title']}: {res['relevance_score']}/3")
         case _:
             parser.print_help()
 
