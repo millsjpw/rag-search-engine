@@ -1,19 +1,18 @@
 import os
+from typing import Optional
 
 from .keyword_search import InvertedIndex
+from .query_enhancement import enhance_query
+from .reranking import rerank
 from .search_utils import (
     DEFAULT_ALPHA,
-    DEFAULT_K,
     DEFAULT_SEARCH_LIMIT,
+    RRF_K,
+    SEARCH_MULTIPLIER,
     format_search_result,
     load_movies,
 )
 from .semantic_search import ChunkedSemanticSearch
-from .gemini import spellcheck_query, rewrite_query, expand_query, rate_against_query, batch_rerank_against_query
-from time import sleep
-import json
-
-from sentence_transformers import CrossEncoder
 
 
 class HybridSearch:
@@ -41,8 +40,9 @@ class HybridSearch:
     def rrf_search(self, query: str, k: int, limit: int = 10) -> list[dict]:
         bm25_results = self._bm25_search(query, limit * 500)
         semantic_results = self.semantic_search.search_chunks(query, limit * 500)
-        combined = combine_search_results_rrf(bm25_results, semantic_results, k)
-        return combined[:limit]
+
+        fused = reciprocal_rank_fusion(bm25_results, semantic_results, k)
+        return fused[:limit]
 
 
 def normalize_scores(scores: list[float]) -> list[float]:
@@ -58,7 +58,6 @@ def normalize_scores(scores: list[float]) -> list[float]:
     normalized_scores = []
     for s in scores:
         normalized_scores.append((s - min_score) / (max_score - min_score))
-
     return normalized_scores
 
 
@@ -79,10 +78,6 @@ def hybrid_score(
 ) -> float:
     return alpha * bm25_score + (1 - alpha) * semantic_score
 
-def rrf_score(bm25_rank: int, semantic_rank: int, k: int = DEFAULT_K) -> float:
-    rrf_bm25 = 1 / (k + bm25_rank) if bm25_rank > 0 else 0
-    rrf_semantic = 1 / (k + semantic_rank) if semantic_rank > 0 else 0
-    return rrf_bm25 + rrf_semantic
 
 def combine_search_results(
     bm25_results: list[dict], semantic_results: list[dict], alpha: float = DEFAULT_ALPHA
@@ -131,48 +126,62 @@ def combine_search_results(
 
     return sorted(hybrid_results, key=lambda x: x["score"], reverse=True)
 
-def combine_search_results_rrf(bm25_results: list[dict], semantic_results: list[dict], k: int = DEFAULT_K) -> list[dict]:
-    bm25_results = sorted(bm25_results, key=lambda x: x["score"], reverse=True)
-    semantic_results = sorted(semantic_results, key=lambda x: x["score"], reverse=True)
-    combined_scores = {}
 
-    for i, result in enumerate(bm25_results):
+def rrf_score(rank: int, k: int = RRF_K) -> float:
+    return 1 / (k + rank)
+
+
+def reciprocal_rank_fusion(
+    bm25_results: list[dict], semantic_results: list[dict], k: int = RRF_K
+) -> list[dict]:
+    rrf_scores = {}
+
+    for rank, result in enumerate(bm25_results, start=1):
         doc_id = result["id"]
-        if doc_id not in combined_scores:
-            combined_scores[doc_id] = {
+        if doc_id not in rrf_scores:
+            rrf_scores[doc_id] = {
                 "title": result["title"],
                 "document": result["document"],
-                "bm25_rank": i + 1,
-                "semantic_rank": 0,
+                "rrf_score": 0.0,
+                "bm25_rank": None,
+                "semantic_rank": None,
             }
+        if rrf_scores[doc_id]["bm25_rank"] is None:
+            rrf_scores[doc_id]["bm25_rank"] = rank
+            rrf_scores[doc_id]["rrf_score"] += rrf_score(rank, k)
 
-    for i, result in enumerate(semantic_results):
+    for rank, result in enumerate(semantic_results, start=1):
         doc_id = result["id"]
-        if doc_id not in combined_scores:
-            combined_scores[doc_id] = {
+        if doc_id not in rrf_scores:
+            rrf_scores[doc_id] = {
                 "title": result["title"],
                 "document": result["document"],
-                "bm25_rank": 0,
-                "semantic_rank": i + 1,
+                "rrf_score": 0.0,
+                "bm25_rank": None,
+                "semantic_rank": None,
             }
-        else:
-            combined_scores[doc_id]["semantic_rank"] = i + 1
+        if rrf_scores[doc_id]["semantic_rank"] is None:
+            rrf_scores[doc_id]["semantic_rank"] = rank
+            rrf_scores[doc_id]["rrf_score"] += rrf_score(rank, k)
+
+    sorted_items = sorted(
+        rrf_scores.items(), key=lambda x: x[1]["rrf_score"], reverse=True
+    )
 
     rrf_results = []
-    for doc_id, data in combined_scores.items():
-        score_value = rrf_score(data["bm25_rank"], data["semantic_rank"], k)
+    for doc_id, data in sorted_items:
         result = format_search_result(
             doc_id=doc_id,
             title=data["title"],
             document=data["document"],
-            score=score_value,
+            score=data["rrf_score"],
+            rrf_score=data["rrf_score"],
             bm25_rank=data["bm25_rank"],
             semantic_rank=data["semantic_rank"],
         )
         rrf_results.append(result)
 
-    return sorted(rrf_results, key=lambda x: x["score"], reverse=True)
-
+    return rrf_results
 
 
 def weighted_search_command(
@@ -193,64 +202,38 @@ def weighted_search_command(
         "results": results,
     }
 
+
 def rrf_search_command(
-    query: str, k: int = DEFAULT_K, limit: int = DEFAULT_SEARCH_LIMIT, enhance: str = None, rerank_method: str = None
+    query: str,
+    k: int = RRF_K,
+    enhance: Optional[str] = None,
+    rerank_method: Optional[str] = None,
+    limit: int = DEFAULT_SEARCH_LIMIT,
 ) -> dict:
     movies = load_movies()
     searcher = HybridSearch(movies)
 
     original_query = query
+    enhanced_query = None
+    if enhance:
+        enhanced_query = enhance_query(query, method=enhance)
+        query = enhanced_query
 
-    if enhance == "spell":
-        enhanced_query = spellcheck_query(query)
-        print(f"Enhanced query ({enhance}): '{query}' -> '{enhanced_query}'")
-        query = enhanced_query
-        
-    elif enhance == "rewrite":
-        enhanced_query = rewrite_query(query)
-        print(f"Enhanced query ({enhance}): '{query}' -> '{enhanced_query}'")
-        query = enhanced_query
-        
-    elif enhance == "expand":
-        enhanced_query = expand_query(query)
-        print(f"Enhanced query ({enhance}): '{query}' -> '{enhanced_query}'")
-        query = enhanced_query
-        
-    if rerank_method:
-        search_limit = limit * 5
-    else:
-        search_limit = limit
+    search_limit = limit * SEARCH_MULTIPLIER if rerank_method else limit
     results = searcher.rrf_search(query, k, search_limit)
 
+    reranked = False
     if rerank_method:
-        if rerank_method == "individual":
-            for doc in results:
-                doc["re-rank"] = rate_against_query(query, doc.get("title", ""), doc.get("document", ""))
-                sleep(3)
-            results = sorted(results, key=lambda x: x.get("re-rank", x["score"]), reverse=True)[:limit]
-        elif rerank_method == "batch":
-            doc_ids = json.loads(batch_rerank_against_query(query, results))
-            # Assuming the response is a JSON list of doc_ids in the order of relevance
-            # sort results based on the order of doc_ids returned by the batch reranking
-            # and assign "re-rank" as the position, i.e. 1, 2, 3, etc.
-            doc_id_to_rank = {doc_id: rank for rank, doc_id in enumerate(doc_ids, start=1)}
-            for doc in results:                
-                doc_id = doc["id"]
-                doc["re-rank"] = doc_id_to_rank.get(doc_id, len(results) + 1)  # If not found, assign a rank worse than all results
-            # sort results based on "re-rank"
-            results = sorted(results, key=lambda x: x.get("re-rank", x["score"]))[:limit]
-        elif rerank_method == "cross_encoder":
-            pairs = [(query, f"{doc.get('title', '')} - {doc.get('document', '')}") for doc in results]
-            cross_encoder = CrossEncoder('cross-encoder/ms-marco-TinyBERT-L2-v2')
-            scores = cross_encoder.predict(pairs)
-            for i, doc in enumerate(results):
-                doc["re-rank"] = scores[i]
-            results = sorted(results, key=lambda x: x.get("re-rank", x["score"]), reverse=True)[:limit]
-            
+        results = rerank(query, results, method=rerank_method, limit=limit)
+        reranked = True
 
     return {
         "original_query": original_query,
+        "enhanced_query": enhanced_query,
+        "enhance_method": enhance,
         "query": query,
         "k": k,
+        "rerank_method": rerank_method,
+        "reranked": reranked,
         "results": results,
     }
